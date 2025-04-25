@@ -11,6 +11,7 @@ import numpy.typing as npt
 from pydrake.geometry import Meshcat
 from pydrake.geometry.optimization import HPolyhedron, VPolytope
 from pydrake.math import RigidTransform, RotationMatrix
+from pydrake.common.eigen_geometry import Quaternion
 from pydrake.multibody.inverse_kinematics import (
     InverseKinematics,
 )
@@ -231,6 +232,7 @@ def spot_body_inverse_kinematics(
             q_gripper,
         )
 
+
     result = Solve(prog)
 
     if not result.is_success():
@@ -238,26 +240,45 @@ def spot_body_inverse_kinematics(
 
     spot_plant.SetPositions(plant_context, result.GetSolution(q))
     return result.GetSolution(q)
-
 def update_robot_config_from_joint_angles(joint_angles, spot, plant_context):
     """Updates the robot configuration in the Meshcat visualization based on joint angles"""
     spot_plant = spot.model.get_mutable_multibody_plant()
     
+    # For arm joints - update positions directly
     if spot.model.has_arm:
-        arm_joint_indices = ["shoulder_0", "shoulder_1", "elbow_0", "elbow_1", "wrist_0", "wrist_1"]
+        # Get current arm positions array
         arm_positions = spot.model.get_arm_state(plant_context)[:spot.model.num_arm_positions()]
         
-        for i, joint_name in enumerate(arm_joint_indices):
-            if joint_name in joint_angles:
-                arm_positions[i] = joint_angles[joint_name]
+        # Map from frontend names to indices in arm_positions array
+        arm_indices = {
+            "shoulder_0": 0,
+            "shoulder_1": 1,
+            "elbow_0": 2,
+            "elbow_1": 3,
+            "wrist_0": 4,
+            "wrist_1": 5
+        }
         
-        spot_plant.SetPositions(plant_context, spot.model.arm_instance, arm_positions)
+        # Update the arm positions array with values from joint_angles
+        arm_updated = False
+        for frontend_name, index in arm_indices.items():
+            if frontend_name in joint_angles and index < len(arm_positions):
+                arm_positions[index] = joint_angles[frontend_name]
+                arm_updated = True
+                print(f"Setting arm joint {frontend_name} to {joint_angles[frontend_name]}")
+        
+        # Apply the updated arm positions array
+        if arm_updated:
+            print(f"Applying arm positions: {arm_positions}")
+            spot_plant.SetPositions(plant_context, spot.model.arm_instance, arm_positions)
     
+    # For gripper - update similarly
     if spot.model.has_arm and "gripper" in joint_angles:
         gripper_positions = spot.model.get_gripper_state(plant_context)[:spot.model.num_gripper_positions()]
         gripper_positions[0] = joint_angles["gripper"]
         spot_plant.SetPositions(plant_context, spot.model.gripper_instance, gripper_positions)
     
+    # Legs - keep the existing approach
     leg_mappings = {
         "front_left_hip_x": ("front_left_hip_x", spot.model.base_instance),
         "front_left_hip_y": ("front_left_hip_y", spot.model.base_instance),
@@ -282,41 +303,45 @@ def update_robot_config_from_joint_angles(joint_angles, spot, plant_context):
             except Exception as e:
                 print(f"Error setting angle for {backend_name}: {e}")
     
-    # Update body position and rotation
     if all(k in joint_angles for k in ["body_pos_x", "body_pos_y", "body_pos_z", 
                                        "body_quat_w", "body_quat_x", "body_quat_y", "body_quat_z"]):
-        from pydrake.math import RigidTransform
-        from pydrake.common.eigen_geometry import Quaternion
-        import numpy as np
-        
-        # Create transform from pose components
-        x = joint_angles["body_pos_x"]
-        y = joint_angles["body_pos_y"]
-        z = joint_angles["body_pos_z"]
-        
-        # Get quaternion components and normalize them
-        qw = joint_angles["body_quat_w"]
-        qx = joint_angles["body_quat_x"]
-        qy = joint_angles["body_quat_y"]
-        qz = joint_angles["body_quat_z"]
-        
-        # Normalize the quaternion
-        quat_norm = np.sqrt(qw**2 + qx**2 + qy**2 + qz**2)
-        if quat_norm < 1e-10:  # Handle extremely small values
-            qw, qx, qy, qz = 1.0, 0.0, 0.0, 0.0
-        else:
-            qw /= quat_norm
-            qx /= quat_norm
-            qy /= quat_norm
-            qz /= quat_norm
-        
-        # Set the free body pose with normalized quaternion
-        X_WB = RigidTransform(
-            Quaternion(qw, qx, qy, qz),
-            np.array([x, y, z])
-        )
-        spot.model.SetFreeBodyPose(plant_context, X_WB)
-    spot_plant.ForcedPublish(plant_context)
+        # Create quaternion with proper normalization
+        try:
+            # Extract quaternion components
+            w = joint_angles["body_quat_w"]
+            x = joint_angles["body_quat_x"]
+            y = joint_angles["body_quat_y"]
+            z = joint_angles["body_quat_z"]
+            
+            # Calculate magnitude for normalization
+            magnitude = np.sqrt(w*w + x*x + y*y + z*z)
+            
+            # Normalize quaternion if magnitude is not zero
+            if magnitude > 1e-10:  # Avoid division by very small numbers
+                w /= magnitude
+                x /= magnitude
+                y /= magnitude
+                z /= magnitude
+            else:
+                # Default to identity quaternion if magnitude is too small
+                w, x, y, z = 1.0, 0.0, 0.0, 0.0
+                
+            quat = Quaternion(w, x, y, z)
+            
+            X_WB = RigidTransform(
+                quat,
+                np.array([
+                    joint_angles["body_pos_x"],
+                    joint_angles["body_pos_y"],
+                    joint_angles["body_pos_z"]
+                ])
+            )
+            spot.model.SetFreeBodyPose(plant_context, X_WB)
+        except Exception as e:
+            print(f"Error setting body pose: {e}")
+            return False
+    
+    return True
 
 def print_keyframe_info(keyframe, current_index, total_count):
     """Prints detailed information about the current keyframe"""
@@ -609,7 +634,7 @@ def web_animation_loop(with_arm: bool = True) -> None:
                 previous_save_request_count = current_save_request_count
                 keyframe = joint_angles_to_keyframe(animation_keyframe_map)
                 keyframe_time += 1
-                save_pose(keyframe, keyframe_count, animation)
+                save_pose(keyframe, keyframe_count, keyframe_time, animation)
                 
                 # Update the keyframe counter after adding a new keyframe
                 current_keyframe_index = len(animation.animation_keyframes) - 1
@@ -1014,12 +1039,8 @@ def web_animation_loop(with_arm: bool = True) -> None:
 
             # READ IN ALL OF THE ARM SLIDERS DIRECTLY
             if spot.model.has_arm:
-                # Read the arm sliders and set the arm positions in the plant_context.
-                for i in range(spot.model.num_arm_joints()):
-                    q_arm[i] = meshcat.GetSliderValue(arm_joint_slider_names[i])
-
                 animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
-                spot_plant.SetPositions(plant_context, spot.model.arm_instance, q_arm)
+                # spot_plant.SetPositions(plant_context, spot.model.arm_instance, q_arm)
                 spot.ForcedPublish(context)
 
             ##### READ IN ALL OF THE LEG SLIDERS DIRECTLY
