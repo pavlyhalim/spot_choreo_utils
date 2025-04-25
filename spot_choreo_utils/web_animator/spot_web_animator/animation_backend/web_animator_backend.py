@@ -294,12 +294,23 @@ def update_robot_config_from_joint_angles(joint_angles, spot, plant_context):
         y = joint_angles["body_pos_y"]
         z = joint_angles["body_pos_z"]
         
+        # Get quaternion components and normalize them
         qw = joint_angles["body_quat_w"]
         qx = joint_angles["body_quat_x"]
         qy = joint_angles["body_quat_y"]
         qz = joint_angles["body_quat_z"]
         
-        # Set the free body pose
+        # Normalize the quaternion
+        quat_norm = np.sqrt(qw**2 + qx**2 + qy**2 + qz**2)
+        if quat_norm < 1e-10:  # Handle extremely small values
+            qw, qx, qy, qz = 1.0, 0.0, 0.0, 0.0
+        else:
+            qw /= quat_norm
+            qx /= quat_norm
+            qy /= quat_norm
+            qz /= quat_norm
+        
+        # Set the free body pose with normalized quaternion
         X_WB = RigidTransform(
             Quaternion(qw, qx, qy, qz),
             np.array([x, y, z])
@@ -598,7 +609,7 @@ def web_animation_loop(with_arm: bool = True) -> None:
                 previous_save_request_count = current_save_request_count
                 keyframe = joint_angles_to_keyframe(animation_keyframe_map)
                 keyframe_time += 1
-                save_pose(keyframe, keyframe_count, keyframe_time, animation)
+                save_pose(keyframe, keyframe_count, animation)
                 
                 # Update the keyframe counter after adding a new keyframe
                 current_keyframe_index = len(animation.animation_keyframes) - 1
