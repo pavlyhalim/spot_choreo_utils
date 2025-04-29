@@ -4,7 +4,7 @@ import asyncio
 import time as time_module
 from copy import copy
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -19,7 +19,7 @@ from pydrake.solvers import Solve
 from pydrake.systems.framework import (
     Context,
 )
-from api.spot_animator_connector import app, websockets
+from api.spot_animator_connector import app
 
 from spot_web_animator.animation_backend.web_animator_drake_ui import (
     ButtonNames,
@@ -240,6 +240,8 @@ def spot_body_inverse_kinematics(
 
     spot_plant.SetPositions(plant_context, result.GetSolution(q))
     return result.GetSolution(q)
+
+
 def update_robot_config_from_joint_angles(joint_angles, spot, plant_context):
     """Updates the robot configuration in the Meshcat visualization based on joint angles"""
     spot_plant = spot.model.get_mutable_multibody_plant()
@@ -343,6 +345,7 @@ def update_robot_config_from_joint_angles(joint_angles, spot, plant_context):
     
     return True
 
+
 def print_keyframe_info(keyframe, current_index, total_count):
     """Prints detailed information about the current keyframe"""
     print(f"\n=== KEYFRAME {current_index + 1}/{total_count} ===")
@@ -417,6 +420,391 @@ def print_keyframe_info(keyframe, current_index, total_count):
             print(f"  rear_right_hip_x: {hr.hip_x:.4f}")
             print(f"  rear_right_hip_y: {hr.hip_y:.4f}")
             print(f"  rear_right_knee: {hr.knee:.4f}")
+
+
+# Button handler functions
+def handle_save_keyframe(
+    animation, 
+    animation_keyframe_map, 
+    keyframe_count, 
+    keyframe_time, 
+    meshcat, 
+    button_names, 
+    current_keyframe_index
+) -> Tuple[int, int, int]:
+    """Handle saving current pose as a keyframe"""
+    keyframe = joint_angles_to_keyframe(animation_keyframe_map)
+    keyframe_time += 1
+    save_pose(keyframe, keyframe_count, keyframe_time, animation)
+    
+    # Update the keyframe counter after adding a new keyframe
+    current_keyframe_index = len(animation.animation_keyframes) - 1
+    update_keyframe_counter(meshcat, button_names, current_keyframe_index, len(animation.animation_keyframes))
+    
+    # Update the segment start/end index sliders to match the new animation length
+    max_idx = len(animation.animation_keyframes) - 1
+    meshcat.DeleteSlider(button_names.segment_start_idx_input)
+    meshcat.DeleteSlider(button_names.segment_end_idx_input)
+    meshcat.AddSlider(button_names.segment_start_idx_input, 0, max_idx, 1, 0)
+    meshcat.AddSlider(button_names.segment_end_idx_input, 0, max_idx, 1, max_idx)
+    
+    return keyframe_time, keyframe_count, current_keyframe_index
+
+
+def handle_prev_keyframe(
+    animation, 
+    meshcat, 
+    button_names, 
+    current_keyframe_index, 
+    spot, 
+    plant_context, 
+    context, 
+    body_pose_sliders
+) -> Tuple[int, Dict[str, Any], RigidTransform]:
+    """Handle previous keyframe button click"""
+    if len(animation.animation_keyframes) > 0:
+        current_keyframe_index = max(0, current_keyframe_index - 1)
+        keyframe = animation.animation_keyframes[current_keyframe_index]
+        update_keyframe_counter(meshcat, button_names, current_keyframe_index, len(animation.animation_keyframes))
+        print(f"Selected keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {keyframe.time:.2f}s)")
+        
+        # Update the time slider to match the keyframe time
+        meshcat.SetSliderValue(button_names.keyframe_time_slider_name, keyframe.time)
+        
+        # Load the keyframe joint angles into the robot model
+        load_joint_angles_from_keyframe(keyframe, spot, plant_context)
+        spot.ForcedPublish(context)
+        
+        # Update X_world_body for IK calculations
+        spot_plant = spot.model.get_mutable_multibody_plant()
+        X_world_body = spot_plant.EvalBodyPoseInWorld(
+            plant_context, spot_plant.GetBodyByName("body", spot.model.base_instance)
+        )
+        
+        # Update animation keyframe map with the loaded keyframe
+        animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
+        
+        # Update body pose sliders to match the loaded keyframe
+        body_pose_sliders_context = body_pose_sliders.GetMyContextFromRoot(context)
+        body_pose_sliders.SetPose(X_world_body)
+        
+        return current_keyframe_index, animation_keyframe_map, X_world_body
+    
+    return current_keyframe_index, None, None
+
+
+def handle_next_keyframe(
+    animation, 
+    meshcat, 
+    button_names, 
+    current_keyframe_index, 
+    spot, 
+    plant_context, 
+    context, 
+    body_pose_sliders
+) -> Tuple[int, Dict[str, Any], RigidTransform]:
+    """Handle next keyframe button click"""
+    if len(animation.animation_keyframes) > 0:
+        current_keyframe_index = min(len(animation.animation_keyframes) - 1, current_keyframe_index + 1)
+        keyframe = animation.animation_keyframes[current_keyframe_index]
+        update_keyframe_counter(meshcat, button_names, current_keyframe_index, len(animation.animation_keyframes))
+        print(f"Selected keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {keyframe.time:.2f}s)")
+        
+        # Update the time slider to match the keyframe time
+        meshcat.SetSliderValue(button_names.keyframe_time_slider_name, keyframe.time)
+        
+        # Load the keyframe joint angles into the robot model
+        load_joint_angles_from_keyframe(keyframe, spot, plant_context)
+        spot.ForcedPublish(context)
+        
+        # Update X_world_body for IK calculations
+        spot_plant = spot.model.get_mutable_multibody_plant()
+        X_world_body = spot_plant.EvalBodyPoseInWorld(
+            plant_context, spot_plant.GetBodyByName("body", spot.model.base_instance)
+        )
+        
+        # Update animation keyframe map with the loaded keyframe
+        animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
+        
+        # Update body pose sliders to match the loaded keyframe
+        body_pose_sliders_context = body_pose_sliders.GetMyContextFromRoot(context)
+        body_pose_sliders.SetPose(X_world_body)
+        
+        return current_keyframe_index, animation_keyframe_map, X_world_body
+    
+    return current_keyframe_index, None, None
+
+
+def handle_keyframe_info(animation, current_keyframe_index):
+    """Handle keyframe info button click"""
+    if len(animation.animation_keyframes) > 0:
+        keyframe = animation.animation_keyframes[current_keyframe_index]
+        print_keyframe_info(keyframe, current_keyframe_index, len(animation.animation_keyframes))
+    else:
+        print("No keyframes in animation")
+
+
+def handle_update_keyframe(animation, current_keyframe_index, animation_keyframe_map, meshcat, button_names, semantic_builder):
+    """Handle update keyframe button click"""
+    if len(animation.animation_keyframes) > 0:
+        # Get current joint angles
+        current_joint_angles = animation_keyframe_map
+        
+        # Create a new keyframe with current joint angles
+        updated_keyframe = joint_angles_to_keyframe(current_joint_angles)
+        
+        new_time = meshcat.GetSliderValue(button_names.keyframe_time_slider_name)
+        
+        # Update the keyframe in the animation with both new pose and time
+        update_keyframe(animation, current_keyframe_index, updated_keyframe)
+        
+        # Update the time separately
+        if update_keyframe_time(animation, current_keyframe_index, new_time):
+            # Save the animation to disk
+            path_to_animation = Path(get_active_choreo_path(), animation.name)
+            save_animation(animation, path_to_animation)
+            
+            print(f"✓ Updated keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {new_time:.2f}s)")
+            
+            # If we have a semantic builder, update it with the modified animation
+            if semantic_builder is not None:
+                semantic_builder.start_from_animation(animation)
+                save_semantic_animation(semantic_builder)
+        else:
+            # Still save the keyframe values even if time update failed
+            path_to_animation = Path(get_active_choreo_path(), animation.name)
+            save_animation(animation, path_to_animation)
+            print(f"✓ Updated keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Pose only)")
+    else:
+        print("No keyframes to update")
+
+
+def handle_load_keyframe(
+    animation, 
+    current_keyframe_index, 
+    spot, 
+    plant_context, 
+    context, 
+    meshcat, 
+    button_names, 
+    body_pose_sliders
+) -> Dict[str, Any]:
+    """Handle load keyframe button click"""
+    if len(animation.animation_keyframes) > 0:
+        keyframe = animation.animation_keyframes[current_keyframe_index]
+        
+        # Load the keyframe joint angles into the robot model
+        load_joint_angles_from_keyframe(keyframe, spot, plant_context)
+        spot.ForcedPublish(context)
+        
+        # Update X_world_body for IK calculations
+        spot_plant = spot.model.get_mutable_multibody_plant()
+        X_world_body = spot_plant.EvalBodyPoseInWorld(
+            plant_context, spot_plant.GetBodyByName("body", spot.model.base_instance)
+        )
+        
+        # Update animation keyframe map with the loaded keyframe
+        animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
+        
+        # Update body pose sliders to match the loaded keyframe
+        body_pose_sliders_context = body_pose_sliders.GetMyContextFromRoot(context)
+        body_pose_sliders.SetPose(X_world_body)
+        
+        # Update the time slider to match the keyframe time
+        meshcat.SetSliderValue(button_names.keyframe_time_slider_name, keyframe.time)
+        
+        print(f"✓ Loaded keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {keyframe.time:.2f}s)")
+        
+        return animation_keyframe_map
+    else:
+        print("No keyframes to load")
+        return None
+
+
+def handle_name_segment(animation, meshcat, button_names, semantic_builder):
+    """Handle naming a segment of the animation"""
+    if len(animation.animation_keyframes) > 0:
+        # Get the segment name from console input
+        segment_name = input("Enter segment name: ")
+        
+        # Get the start and end indices from the sliders
+        start_index = int(meshcat.GetSliderValue(button_names.segment_start_idx_input))
+        end_index = int(meshcat.GetSliderValue(button_names.segment_end_idx_input))
+        
+        # Validate the indices
+        if start_index < 0 or start_index >= len(animation.animation_keyframes):
+            print(f"Invalid start index: {start_index}")
+        elif end_index < 0 or end_index >= len(animation.animation_keyframes):
+            print(f"Invalid end index: {end_index}")
+        elif start_index > end_index:
+            print(f"Start index ({start_index}) must be less than or equal to end index ({end_index})")
+        elif not segment_name:
+            print("Segment name cannot be empty")
+        else:
+            # Create semantic builder if it doesn't exist
+            if semantic_builder is None:
+                semantic_builder = create_semantic_animation_builder(animation)
+            
+            # Name the segment
+            if name_animation_segment(semantic_builder, segment_name, start_index, end_index):
+                # Save the semantic animation
+                semantic_file_path = save_semantic_animation(semantic_builder)
+                print(f"✓ Named segment '{segment_name}' from keyframe {start_index+1} to {end_index+1}")
+                print(f"  Saved to {semantic_file_path}")
+            else:
+                print(f"Failed to name segment '{segment_name}'")
+    else:
+        print("No keyframes in animation")
+    
+    return semantic_builder
+
+
+def handle_play_animation(animation, current_keyframe_index, spot, plant_context, context, meshcat, button_names):
+    """Handle playing the animation"""
+    if len(animation.animation_keyframes) > 0:
+        print("\nPlaying animation with proper timing...")
+        
+        total_keyframes = len(animation.animation_keyframes)
+        
+        # Always start by displaying the first keyframe
+        current_keyframe_index = 0
+        keyframe = animation.animation_keyframes[0]
+        print(f"Playing keyframe {1}/{total_keyframes} (Time: {keyframe.time:.2f}s)")
+        
+        # Update the counter display
+        update_keyframe_counter(meshcat, button_names, 0, total_keyframes)
+        
+        # Load first keyframe into the robot model
+        load_joint_angles_from_keyframe(keyframe, spot, plant_context)
+        spot.ForcedPublish(context)
+        
+        # Small initial pause to let the first pose register visually
+        time_module.sleep(0.5)
+        
+        # Then play the remaining keyframes with proper timing
+        for i in range(1, total_keyframes):
+            prev_keyframe = animation.animation_keyframes[i-1]
+            keyframe = animation.animation_keyframes[i]
+            
+            # Calculate time to wait based on keyframe times
+            time_difference = keyframe.time - prev_keyframe.time
+            print(f"Playing keyframe {i+1}/{total_keyframes} (Time: {keyframe.time:.2f}s)")
+            print(f"  Waiting {time_difference:.2f}s based on keyframe timing")
+            
+            # Wait the appropriate time
+            if time_difference > 0:
+                time_module.sleep(time_difference)
+            
+            # Update the counter display
+            update_keyframe_counter(meshcat, button_names, i, total_keyframes)
+            
+            # Load keyframe into the robot model
+            load_joint_angles_from_keyframe(keyframe, spot, plant_context)
+            
+            # Force visualization update
+            spot.ForcedPublish(context)
+        
+        print("Playback completed")
+    else:
+        print("No keyframes to play")
+
+    return current_keyframe_index
+
+
+def handle_stop_animation(is_playing, synced_coordinator, playback_thread):
+    """Handle stopping animation playback"""
+    if is_playing:
+        if synced_coordinator is not None:
+            # Stop the playback on real robot
+            asyncio.run(synced_coordinator.stop())
+        
+        # Stop simulation playback
+        is_playing = False
+        if playback_thread is not None:
+            # Wait for playback thread to finish
+            playback_thread.join(timeout=0.5)
+            playback_thread = None
+            
+        print("Stopped animation playback")
+    else:
+        print("No animation playing")
+    
+    return is_playing, playback_thread
+
+
+def handle_adjust_timing(animation, semantic_builder):
+    """Handle adjusting animation timing"""
+    if len(animation.animation_keyframes) > 1:
+        print("\nAdjusting animation timing...")
+        print("Current keyframe times:")
+        keyframe_times = get_keyframe_times(animation)
+        for i, time in enumerate(keyframe_times):
+            print(f"  Keyframe {i+1}: {time:.2f}s")
+        
+        # Scale the entire animation by asking for the new end time
+        try:
+            current_end_time = keyframe_times[-1]
+            scale_factor = float(input(f"Current animation length: {current_end_time:.2f}s\nEnter new length in seconds: ")) / current_end_time
+            
+            # Scale all keyframe times except the first one
+            new_times = [0.0] + [time * scale_factor for time in keyframe_times[1:]]
+            keyframe_indices = list(range(len(keyframe_times)))
+            
+            # Adjust the timing
+            if adjust_animation_timing(animation, keyframe_indices, new_times):
+                # Save the animation
+                path_to_animation = Path(get_active_choreo_path(), animation.name)
+                save_animation(animation, path_to_animation)
+                
+                print("\nNew keyframe times:")
+                for i, time in enumerate(get_keyframe_times(animation)):
+                    print(f"  Keyframe {i+1}: {time:.2f}s")
+                
+                if semantic_builder is not None:
+                    semantic_builder.start_from_animation(animation)
+                    save_semantic_animation(semantic_builder)
+        except ValueError:
+            print("Invalid input, must be a number")
+    else:
+        print("Need at least 2 keyframes to adjust timing")
+
+
+def handle_lock_leg(
+    leg_type: str,
+    button_clicks: int, 
+    previous_button_clicks: int,
+    button_names: ButtonNames,
+    meshcat: Meshcat,
+    leg_joint_names: List[str],
+    q0_angles: List[float],
+    unlocked_legs: List[FootCenterFrame],
+    leg_limits: List[List[float]],
+    base_joint_slider_names: List[str],
+    current_sliders: List[str],
+    foot_center_frame: FootCenterFrame
+) -> Tuple[int, List[List[float]], List[str], List[float], List[str], List[FootCenterFrame]]:
+    """Handle locking/unlocking a leg"""
+    previous_button_clicks = button_clicks
+    
+    if (button_clicks % 2) == 1:
+        # Unlock the leg
+        leg_limits += leg_limits_base
+        base_joint_slider_names.extend(leg_joint_names)
+        q0_angles.extend(q0_angles)
+        unlocked_legs.append(foot_center_frame)
+    else:
+        # Lock the leg
+        for i in range(len(leg_joint_names)):
+            meshcat.DeleteSlider(leg_joint_names[i])
+        for c in range(0, 3):
+            leg_limits.pop()
+            base_joint_slider_names.remove(leg_joint_names[c])
+            if leg_joint_names[c] in current_sliders:
+                current_sliders.remove(leg_joint_names[c])
+            q0_angles.pop()
+        unlocked_legs.remove(foot_center_frame)
+    
+    return previous_button_clicks, leg_limits, base_joint_slider_names, q0_angles, current_sliders, unlocked_legs
 
 
 def web_animation_loop(with_arm: bool = True) -> None:
@@ -541,8 +929,6 @@ def web_animation_loop(with_arm: bool = True) -> None:
         api_thread = threading.Thread(target=run_api_server, daemon=True)
         api_thread.start()
 
-        # print(f"Set active animation '{animation.name}' with {len(animation.animation_keyframes)} keyframes")
-
         # Sets up the drake UI controls
         front_left_q0_angles, front_right_q0_angles, hind_left_q0_angles, hind_right_q0_angles = setup_ui_buttons(
             meshcat, spot, plant_context, button_names
@@ -632,20 +1018,15 @@ def web_animation_loop(with_arm: bool = True) -> None:
 
             if current_save_request_count != previous_save_request_count:
                 previous_save_request_count = current_save_request_count
-                keyframe = joint_angles_to_keyframe(animation_keyframe_map)
-                keyframe_time += 1
-                save_pose(keyframe, keyframe_count, keyframe_time, animation)
-                
-                # Update the keyframe counter after adding a new keyframe
-                current_keyframe_index = len(animation.animation_keyframes) - 1
-                update_keyframe_counter(meshcat, button_names, current_keyframe_index, len(animation.animation_keyframes))
-                
-                # Update the segment start/end index sliders to match the new animation length
-                max_idx = len(animation.animation_keyframes) - 1
-                meshcat.DeleteSlider(button_names.segment_start_idx_input)
-                meshcat.DeleteSlider(button_names.segment_end_idx_input)
-                meshcat.AddSlider(button_names.segment_start_idx_input, 0, max_idx, 1, 0)
-                meshcat.AddSlider(button_names.segment_end_idx_input, 0, max_idx, 1, max_idx)
+                keyframe_time, keyframe_count, current_keyframe_index = handle_save_keyframe(
+                    animation, 
+                    animation_keyframe_map, 
+                    keyframe_count, 
+                    keyframe_time, 
+                    meshcat, 
+                    button_names, 
+                    current_keyframe_index
+                )
 
             ####
             # End save pose as keyframe
@@ -658,273 +1039,96 @@ def web_animation_loop(with_arm: bool = True) -> None:
             # Handle previous keyframe button
             if prev_keyframe_button_clicks != previous_prev_keyframe_button_clicks:
                 previous_prev_keyframe_button_clicks = prev_keyframe_button_clicks
-                if len(animation.animation_keyframes) > 0:
-                    current_keyframe_index = max(0, current_keyframe_index - 1)
-                    keyframe = animation.animation_keyframes[current_keyframe_index]
-                    update_keyframe_counter(meshcat, button_names, current_keyframe_index, len(animation.animation_keyframes))
-                    print(f"Selected keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {keyframe.time:.2f}s)")
-                    
-                    # Update the time slider to match the keyframe time
-                    meshcat.SetSliderValue(button_names.keyframe_time_slider_name, keyframe.time)
-                    
-                    # Load the keyframe joint angles into the robot model
-                    load_joint_angles_from_keyframe(keyframe, spot, plant_context)
-                    spot.ForcedPublish(context)
-                    
-                    # Update X_world_body for IK calculations
-                    X_world_body = spot_plant.EvalBodyPoseInWorld(
-                        plant_context, spot_plant.GetBodyByName("body", spot.model.base_instance)
-                    )
-                    
-                    # Update animation keyframe map with the loaded keyframe
-                    animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
-                    
-                    # Update body pose sliders to match the loaded keyframe
-                    body_pose_sliders_context = body_pose_sliders.GetMyContextFromRoot(context)
-                    body_pose_sliders.SetPose(X_world_body)
+                result = handle_prev_keyframe(
+                    animation, 
+                    meshcat, 
+                    button_names, 
+                    current_keyframe_index, 
+                    spot, 
+                    plant_context, 
+                    context, 
+                    body_pose_sliders
+                )
+                if result[0] is not None:
+                    current_keyframe_index = result[0]
+                if result[1] is not None:
+                    animation_keyframe_map = result[1]
+                if result[2] is not None:
+                    X_world_body = result[2]
             
             # Handle next keyframe button
             if next_keyframe_button_clicks != previous_next_keyframe_button_clicks:
                 previous_next_keyframe_button_clicks = next_keyframe_button_clicks
-                if len(animation.animation_keyframes) > 0:
-                    current_keyframe_index = min(len(animation.animation_keyframes) - 1, current_keyframe_index + 1)
-                    keyframe = animation.animation_keyframes[current_keyframe_index]
-                    update_keyframe_counter(meshcat, button_names, current_keyframe_index, len(animation.animation_keyframes))
-                    print(f"Selected keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {keyframe.time:.2f}s)")
-                    
-                    # Update the time slider to match the keyframe time
-                    meshcat.SetSliderValue(button_names.keyframe_time_slider_name, keyframe.time)
-                    
-                    # Load the keyframe joint angles into the robot model
-                    load_joint_angles_from_keyframe(keyframe, spot, plant_context)
-                    spot.ForcedPublish(context)
-                    
-                    # Update X_world_body for IK calculations
-                    X_world_body = spot_plant.EvalBodyPoseInWorld(
-                        plant_context, spot_plant.GetBodyByName("body", spot.model.base_instance)
-                    )
-                    
-                    # Update animation keyframe map with the loaded keyframe
-                    animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
-                    
-                    # Update body pose sliders to match the loaded keyframe
-                    body_pose_sliders_context = body_pose_sliders.GetMyContextFromRoot(context)
-                    body_pose_sliders.SetPose(X_world_body)
+                result = handle_next_keyframe(
+                    animation, 
+                    meshcat, 
+                    button_names, 
+                    current_keyframe_index, 
+                    spot, 
+                    plant_context, 
+                    context, 
+                    body_pose_sliders
+                )
+                if result[0] is not None:
+                    current_keyframe_index = result[0]
+                if result[1] is not None:
+                    animation_keyframe_map = result[1]
+                if result[2] is not None:
+                    X_world_body = result[2]
             
             # Handle keyframe info button
             if keyframe_info_button_clicks != previous_keyframe_info_button_clicks:
                 previous_keyframe_info_button_clicks = keyframe_info_button_clicks
-                if len(animation.animation_keyframes) > 0:
-                    keyframe = animation.animation_keyframes[current_keyframe_index]
-                    print_keyframe_info(keyframe, current_keyframe_index, len(animation.animation_keyframes))
-                else:
-                    print("No keyframes in animation")
+                handle_keyframe_info(animation, current_keyframe_index)
             
             # Handle update keyframe 
             if update_keyframe_button_clicks != previous_update_keyframe_button_clicks:
                 previous_update_keyframe_button_clicks = update_keyframe_button_clicks
-                if len(animation.animation_keyframes) > 0:
-                    # Get current joint angles
-                    current_joint_angles = animation_keyframe_map
-                    
-                    # Create a new keyframe with current joint angles
-                    updated_keyframe = joint_angles_to_keyframe(current_joint_angles)
-                    
-                    new_time = meshcat.GetSliderValue(button_names.keyframe_time_slider_name)
-                    
-                    # Update the keyframe in the animation with both new pose and time
-                    update_keyframe(animation, current_keyframe_index, updated_keyframe)
-                    
-                    # Update the time separately
-                    if update_keyframe_time(animation, current_keyframe_index, new_time):
-                        # Save the animation to disk
-                        path_to_animation = Path(get_active_choreo_path(), animation.name)
-                        save_animation(animation, path_to_animation)
-                        
-                        print(f"✓ Updated keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {new_time:.2f}s)")
-                        
-                        # If we have a semantic builder, update it with the modified animation
-                        if semantic_builder is not None:
-                            semantic_builder.start_from_animation(animation)
-                            save_semantic_animation(semantic_builder)
-                    else:
-                        # Still save the keyframe values even if time update failed
-                        path_to_animation = Path(get_active_choreo_path(), animation.name)
-                        save_animation(animation, path_to_animation)
-                        print(f"✓ Updated keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Pose only)")
-                else:
-                    print("No keyframes to update")
+                handle_update_keyframe(animation, current_keyframe_index, animation_keyframe_map, meshcat, button_names, semantic_builder)
                         
             # Handle load keyframe button
             if load_keyframe_button_clicks != previous_load_keyframe_button_clicks:
                 previous_load_keyframe_button_clicks = load_keyframe_button_clicks
-                if len(animation.animation_keyframes) > 0:
-                    keyframe = animation.animation_keyframes[current_keyframe_index]
-                    
-                    # Load the keyframe joint angles into the robot model
-                    load_joint_angles_from_keyframe(keyframe, spot, plant_context)
-                    spot.ForcedPublish(context)
-                    
-                    # Update X_world_body for IK calculations
-                    X_world_body = spot_plant.EvalBodyPoseInWorld(
-                        plant_context, spot_plant.GetBodyByName("body", spot.model.base_instance)
-                    )
-                    
-                    # Update animation keyframe map with the loaded keyframe
-                    animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
-                    
-                    # Update body pose sliders to match the loaded keyframe
-                    body_pose_sliders_context = body_pose_sliders.GetMyContextFromRoot(context)
-                    body_pose_sliders.SetPose(X_world_body)
-                    
-                    # Update the time slider to match the keyframe time
-                    meshcat.SetSliderValue(button_names.keyframe_time_slider_name, keyframe.time)
-                    
-                    print(f"✓ Loaded keyframe {current_keyframe_index + 1}/{len(animation.animation_keyframes)} (Time: {keyframe.time:.2f}s)")
-                else:
-                    print("No keyframes to load")
+                result = handle_load_keyframe(
+                    animation, 
+                    current_keyframe_index, 
+                    spot, 
+                    plant_context, 
+                    context, 
+                    meshcat, 
+                    button_names, 
+                    body_pose_sliders
+                )
+                if result is not None:
+                    animation_keyframe_map = result
             
             # Handle naming segments
             if name_segment_button_clicks != previous_name_segment_button_clicks:
                 previous_name_segment_button_clicks = name_segment_button_clicks
-                if len(animation.animation_keyframes) > 0:
-                    # Get the segment name from console input
-                    segment_name = input("Enter segment name: ")
-                    
-                    # Get the start and end indices from the sliders
-                    start_index = int(meshcat.GetSliderValue(button_names.segment_start_idx_input))
-                    end_index = int(meshcat.GetSliderValue(button_names.segment_end_idx_input))
-                    
-                    # Validate the indices
-                    if start_index < 0 or start_index >= len(animation.animation_keyframes):
-                        print(f"Invalid start index: {start_index}")
-                    elif end_index < 0 or end_index >= len(animation.animation_keyframes):
-                        print(f"Invalid end index: {end_index}")
-                    elif start_index > end_index:
-                        print(f"Start index ({start_index}) must be less than or equal to end index ({end_index})")
-                    elif not segment_name:
-                        print("Segment name cannot be empty")
-                    else:
-                        # Create semantic builder if it doesn't exist
-                        if semantic_builder is None:
-                            semantic_builder = create_semantic_animation_builder(animation)
-                        
-                        # Name the segment
-                        if name_animation_segment(semantic_builder, segment_name, start_index, end_index):
-                            # Save the semantic animation
-                            semantic_file_path = save_semantic_animation(semantic_builder)
-                            print(f"✓ Named segment '{segment_name}' from keyframe {start_index+1} to {end_index+1}")
-                            print(f"  Saved to {semantic_file_path}")
-                        else:
-                            print(f"Failed to name segment '{segment_name}'")
-                else:
-                    print("No keyframes in animation")
+                semantic_builder = handle_name_segment(animation, meshcat, button_names, semantic_builder)
             
             # Handle animation playback
             if play_animation_button_clicks != previous_play_animation_button_clicks:
                 previous_play_animation_button_clicks = play_animation_button_clicks
-                if len(animation.animation_keyframes) > 0:
-                    print("\nPlaying animation with proper timing...")
-                    
-                    total_keyframes = len(animation.animation_keyframes)
-                    
-                    # Always start by displaying the first keyframe
-                    current_keyframe_index = 0
-                    keyframe = animation.animation_keyframes[0]
-                    print(f"Playing keyframe {1}/{total_keyframes} (Time: {keyframe.time:.2f}s)")
-                    
-                    # Update the counter display
-                    update_keyframe_counter(meshcat, button_names, 0, total_keyframes)
-                    
-                    # Load first keyframe into the robot model
-                    load_joint_angles_from_keyframe(keyframe, spot, plant_context)
-                    spot.ForcedPublish(context)
-                    
-                    # Small initial pause to let the first pose register visually
-                    time_module.sleep(0.5)
-                    
-                    # Then play the remaining keyframes with proper timing
-                    for i in range(1, total_keyframes):
-                        prev_keyframe = animation.animation_keyframes[i-1]
-                        keyframe = animation.animation_keyframes[i]
-                        
-                        # Calculate time to wait based on keyframe times
-                        time_difference = keyframe.time - prev_keyframe.time
-                        print(f"Playing keyframe {i+1}/{total_keyframes} (Time: {keyframe.time:.2f}s)")
-                        print(f"  Waiting {time_difference:.2f}s based on keyframe timing")
-                        
-                        # Wait the appropriate time
-                        if time_difference > 0:
-                            time_module.sleep(time_difference)
-                        
-                        # Update the counter display
-                        update_keyframe_counter(meshcat, button_names, i, total_keyframes)
-                        
-                        # Load keyframe into the robot model
-                        load_joint_angles_from_keyframe(keyframe, spot, plant_context)
-                        
-                        # Force visualization update
-                        spot.ForcedPublish(context)
-                    
-                    print("Playback completed")
-                else:
-                    print("No keyframes to play")
+                current_keyframe_index = handle_play_animation(
+                    animation,
+                    current_keyframe_index,
+                    spot,
+                    plant_context,
+                    context,
+                    meshcat,
+                    button_names
+                )
 
             # Handle stop playback with improved state tracking
             if stop_animation_button_clicks != previous_stop_animation_button_clicks:
                 previous_stop_animation_button_clicks = stop_animation_button_clicks
-                if is_playing:
-                    if synced_coordinator is not None:
-                        # Stop the playback on real robot
-                        asyncio.run(synced_coordinator.stop())
-                    
-                    # Stop simulation playback
-                    is_playing = False
-                    if playback_thread is not None:
-                        # Wait for playback thread to finish
-                        playback_thread.join(timeout=0.5)
-                        playback_thread = None
-                        
-                    print("Stopped animation playback")
-                else:
-                    print("No animation playing")
+                is_playing, playback_thread = handle_stop_animation(is_playing, synced_coordinator, playback_thread)
 
             # Handle adjust timing
             if adjust_timing_button_clicks != previous_adjust_timing_button_clicks:
                 previous_adjust_timing_button_clicks = adjust_timing_button_clicks
-                if len(animation.animation_keyframes) > 1:
-                    print("\nAdjusting animation timing...")
-                    print("Current keyframe times:")
-                    keyframe_times = get_keyframe_times(animation)
-                    for i, time in enumerate(keyframe_times):
-                        print(f"  Keyframe {i+1}: {time:.2f}s")
-                    
-                    # Scale the entire animation by asking for the new end time
-                    try:
-                        current_end_time = keyframe_times[-1]
-                        scale_factor = float(input(f"Current animation length: {current_end_time:.2f}s\nEnter new length in seconds: ")) / current_end_time
-                        
-                        # Scale all keyframe times except the first one
-                        new_times = [0.0] + [time * scale_factor for time in keyframe_times[1:]]
-                        keyframe_indices = list(range(len(keyframe_times)))
-                        
-                        # Adjust the timing
-                        if adjust_animation_timing(animation, keyframe_indices, new_times):
-                            # Save the animation
-                            path_to_animation = Path(get_active_choreo_path(), animation.name)
-                            save_animation(animation, path_to_animation)
-                            
-                            print("\nNew keyframe times:")
-                            for i, time in enumerate(get_keyframe_times(animation)):
-                                print(f"  Keyframe {i+1}: {time:.2f}s")
-                            
-                            if semantic_builder is not None:
-                                semantic_builder.start_from_animation(animation)
-                                save_semantic_animation(semantic_builder)
-                    except ValueError:
-                        print("Invalid input, must be a number")
-                else:
-                    print("Need at least 2 keyframes to adjust timing")
+                handle_adjust_timing(animation, semantic_builder)
             
             ###
             # END KEYFRAME NAVIGATION SECTION
@@ -934,87 +1138,102 @@ def web_animation_loop(with_arm: bool = True) -> None:
             # Start Handle Leg Controls
             ####
 
-            if (
-                lock_front_left_button_clicks != previous_lock_front_left_button_clicks
-                or lock_front_right_button_clicks != previous_lock_front_right_button_clicks
-                or lock_hind_left_button_clicks != previous_lock_hind_left_button_clicks
-                or lock_hind_right_button_clicks != previous_lock_hind_right_button_clicks
-            ):
-                # FRONT LEFT LEG##
+            if (lock_front_left_button_clicks != previous_lock_front_left_button_clicks or
+                lock_front_right_button_clicks != previous_lock_front_right_button_clicks or
+                lock_hind_left_button_clicks != previous_lock_hind_left_button_clicks or
+                lock_hind_right_button_clicks != previous_lock_hind_right_button_clicks):
+
+                # Handle front left leg
                 if lock_front_left_button_clicks != previous_lock_front_left_button_clicks:
-                    previous_lock_front_left_button_clicks = lock_front_left_button_clicks
-                    if (lock_front_left_button_clicks % 2) == 1:
-                        leg_limits += leg_limits_base
-                        base_joint_slider_names.extend(button_names.front_left_base_joint_slider_names)
-                        q0_angles.extend(front_left_q0_angles)
-                        body_state = spot.model.get_base_state(plant_context)
-                        unlocked_legs.append(FootCenterFrame.FRONT_LEFT)
-                    else:
-                        for i in range(len(button_names.front_left_base_joint_slider_names)):
-                            meshcat.DeleteSlider(button_names.front_left_base_joint_slider_names[i])
-                        for c in range(0, 3):
-                            leg_limits.pop()
-                            base_joint_slider_names.remove(button_names.front_left_base_joint_slider_names[c])
-                            current_sliders.remove(button_names.front_left_base_joint_slider_names[c])
-                            q0_angles.remove(front_left_q0_angles[c])
-                        unlocked_legs.remove(FootCenterFrame.FRONT_LEFT)
+                    result = handle_lock_leg(
+                        "front_left",
+                        lock_front_left_button_clicks,
+                        previous_lock_front_left_button_clicks,
+                        button_names,
+                        meshcat,
+                        button_names.front_left_base_joint_slider_names,
+                        front_left_q0_angles,
+                        unlocked_legs,
+                        leg_limits,
+                        base_joint_slider_names,
+                        current_sliders,
+                        FootCenterFrame.FRONT_LEFT
+                    )
+                    previous_lock_front_left_button_clicks = result[0]
+                    leg_limits = result[1]
+                    base_joint_slider_names = result[2]
+                    q0_angles = result[3]
+                    current_sliders = result[4]
+                    unlocked_legs = result[5]
 
-                ##FRONT RIGHT LEG##
+                # Handle front right leg
                 if lock_front_right_button_clicks != previous_lock_front_right_button_clicks:
-                    previous_lock_front_right_button_clicks = lock_front_right_button_clicks
-                    if (lock_front_right_button_clicks % 2) == 1:
-                        leg_limits += leg_limits_base
-                        base_joint_slider_names.extend(button_names.front_right_base_joint_slider_names)
-                        q0_angles.extend(front_right_q0_angles)
-                        body_state = spot.model.get_base_state(plant_context)
-                        unlocked_legs.append(FootCenterFrame.FRONT_RIGHT)
-                    else:
-                        for i in range(len(button_names.front_right_base_joint_slider_names)):
-                            meshcat.DeleteSlider(button_names.front_right_base_joint_slider_names[i])
-                        for c in range(0, 3):
-                            leg_limits.pop()
-                            base_joint_slider_names.remove(button_names.front_right_base_joint_slider_names[c])
-                            current_sliders.remove(button_names.front_right_base_joint_slider_names[c])
-                            q0_angles.remove(front_right_q0_angles[c])
-                        unlocked_legs.remove(FootCenterFrame.FRONT_RIGHT)
+                    result = handle_lock_leg(
+                        "front_right",
+                        lock_front_right_button_clicks,
+                        previous_lock_front_right_button_clicks,
+                        button_names,
+                        meshcat,
+                        button_names.front_right_base_joint_slider_names,
+                        front_right_q0_angles,
+                        unlocked_legs,
+                        leg_limits,
+                        base_joint_slider_names,
+                        current_sliders,
+                        FootCenterFrame.FRONT_RIGHT
+                    )
+                    previous_lock_front_right_button_clicks = result[0]
+                    leg_limits = result[1]
+                    base_joint_slider_names = result[2]
+                    q0_angles = result[3]
+                    current_sliders = result[4]
+                    unlocked_legs = result[5]
 
-                # HIND LEFT LEG##
+                # Handle hind left leg
                 if lock_hind_left_button_clicks != previous_lock_hind_left_button_clicks:
-                    previous_lock_hind_left_button_clicks = lock_hind_left_button_clicks
-                    if (lock_hind_left_button_clicks % 2) == 1:
-                        leg_limits += leg_limits_base
-                        base_joint_slider_names.extend(button_names.hind_left_base_joint_slider_names)
-                        q0_angles.extend(hind_left_q0_angles)
-                        body_state = spot.model.get_base_state(plant_context)
-                        unlocked_legs.append(FootCenterFrame.FRONT_LEFT)
-                    else:
-                        for i in range(len(button_names.hind_left_base_joint_slider_names)):
-                            meshcat.DeleteSlider(button_names.hind_left_base_joint_slider_names[i])
-                        for c in range(0, 3):
-                            leg_limits.pop()
-                            base_joint_slider_names.remove(button_names.hind_left_base_joint_slider_names[c])
-                            current_sliders.remove(button_names.hind_left_base_joint_slider_names[c])
-                            q0_angles.remove(hind_left_q0_angles[c])
-                        unlocked_legs.remove(FootCenterFrame.FRONT_LEFT)
+                    result = handle_lock_leg(
+                        "hind_left",
+                        lock_hind_left_button_clicks,
+                        previous_lock_hind_left_button_clicks,
+                        button_names,
+                        meshcat,
+                        button_names.hind_left_base_joint_slider_names,
+                        hind_left_q0_angles,
+                        unlocked_legs,
+                        leg_limits,
+                        base_joint_slider_names,
+                        current_sliders,
+                        FootCenterFrame.FRONT_LEFT
+                    )
+                    previous_lock_hind_left_button_clicks = result[0]
+                    leg_limits = result[1]
+                    base_joint_slider_names = result[2]
+                    q0_angles = result[3]
+                    current_sliders = result[4]
+                    unlocked_legs = result[5]
 
-                ##HIND RIGHT LEG##
+                # Handle hind right leg
                 if lock_hind_right_button_clicks != previous_lock_hind_right_button_clicks:
-                    previous_lock_hind_right_button_clicks = lock_hind_right_button_clicks
-                    if (lock_hind_right_button_clicks % 2) == 1:
-                        leg_limits += leg_limits_base
-                        base_joint_slider_names.extend(button_names.hind_right_base_joint_slider_names)
-                        q0_angles.extend(hind_right_q0_angles)
-                        body_state = spot.model.get_base_state(plant_context)
-                        unlocked_legs.append(FootCenterFrame.FRONT_RIGHT)
-                    else:
-                        for i in range(len(button_names.hind_right_base_joint_slider_names)):
-                            meshcat.DeleteSlider(button_names.hind_right_base_joint_slider_names[i])
-                        for c in range(0, 3):
-                            leg_limits.pop()
-                            base_joint_slider_names.remove(button_names.hind_right_base_joint_slider_names[c])
-                            current_sliders.remove(button_names.hind_right_base_joint_slider_names[c])
-                            q0_angles.remove(hind_right_q0_angles[c])
-                        unlocked_legs.remove(FootCenterFrame.FRONT_RIGHT)
+                    result = handle_lock_leg(
+                        "hind_right",
+                        lock_hind_right_button_clicks,
+                        previous_lock_hind_right_button_clicks,
+                        button_names,
+                        meshcat,
+                        button_names.hind_right_base_joint_slider_names,
+                        hind_right_q0_angles,
+                        unlocked_legs,
+                        leg_limits,
+                        base_joint_slider_names,
+                        current_sliders,
+                        FootCenterFrame.FRONT_RIGHT
+                    )
+                    previous_lock_hind_right_button_clicks = result[0]
+                    leg_limits = result[1]
+                    base_joint_slider_names = result[2]
+                    q0_angles = result[3]
+                    current_sliders = result[4]
+                    unlocked_legs = result[5]
 
                 # Adding any new sliders that need to be added
                 for i in range(len(base_joint_slider_names)):
@@ -1040,7 +1259,6 @@ def web_animation_loop(with_arm: bool = True) -> None:
             # READ IN ALL OF THE ARM SLIDERS DIRECTLY
             if spot.model.has_arm:
                 animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
-                # spot_plant.SetPositions(plant_context, spot.model.arm_instance, q_arm)
                 spot.ForcedPublish(context)
 
             ##### READ IN ALL OF THE LEG SLIDERS DIRECTLY
@@ -1084,8 +1302,6 @@ def web_animation_loop(with_arm: bool = True) -> None:
             animation_keyframe_map = print_as_animation_keyframe(spot_plant, spot, plant_context, X_world_body)
 
             if q_ik is not None:
-                current_time = time_module.localtime()
-                formatted_time = time_module.strftime("%H:%M:%S", current_time)
                 spot_plant.SetPositions(plant_context, q_ik)
                 spot.ForcedPublish(context)
 

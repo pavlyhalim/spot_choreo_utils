@@ -258,9 +258,7 @@ useEffect(() => {
           
           // Update UI elements for keyframes
           const max_idx = response.keyframes.length - 1;
-          
-          console.log(`Would update slider ranges to max index: ${max_idx}`);
-          
+                    
           // Load the first keyframe
           loadKeyframe(0);
         }
@@ -348,10 +346,7 @@ useEffect(() => {
           
           // Update UI elements for keyframes
           const max_idx = response.keyframes.length - 1;
-          
-
-          console.log(`Would update slider ranges to max index: ${max_idx}`);
-          
+                    
           // Load the first keyframe
           loadKeyframe(0);
         }
@@ -1031,13 +1026,6 @@ const stopAnimation = async () => {
             <Edit3 size={16} className="mr-1" /> Update Keyframe
           </button>
           
-          {/* <button 
-            className="flex-1 px-3 py-2 bg-green-500 text-white rounded hover:bg-green-600 flex items-center justify-center"
-            onClick={() => loadKeyframe(currentKeyframeIndex)}
-            disabled={!animation}
-          >
-            <SkipBack size={16} className="mr-1" /> Reload
-          </button> */}
         </div>
       </div>
     )}
